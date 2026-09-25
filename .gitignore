@@ -1,0 +1,16 @@
+# Secrets
+camera/secrets.h
+.env
+
+# Runtime artifacts (memories and camera images stay on this PC)
+*.db
+*.db-journal
+*.jpg
+*.jpeg
+
+# Python
+__pycache__/
+*.pyc
+
+# Build output
+build/
