@@ -5,17 +5,18 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from datetime import datetime
 
 import requests
 
-CAMERA_URL = None  # set in main() from the command line or the CAMERA_IP env var
 OLLAMA_URL = "http://localhost:11434/api/chat"
+ASKING = threading.Event()  # set while a question is being answered; the watcher waits so it goes first
 MODEL = "qwen2.5vl:7b"
 DB_PATH = "memory.db"
 IMAGE_PATH = "last_capture.jpg"
 
-PROMPT = """Describe this photo, taken from a camera worn on my shoulder, as a memory record.
+PROMPT = """Describe this photo, taken from my own point of view, as a memory record.
 Reply with ONLY a JSON object with exactly these keys:
 {
   "summary": "one or two sentences describing the scene",
@@ -26,13 +27,22 @@ Reply with ONLY a JSON object with exactly these keys:
   "activity": "what I appear to be doing"
 }
 Rules:
+- Only list objects you can clearly see. Do not invent objects that might be there.
 - Only include text you can read clearly. Do NOT guess blurry, partial, or tiny text; leave it out.
 - Only include dates that are actually visible in the image.
 - Use empty lists when nothing applies."""
 
 
-def capture():
-    resp = requests.get(CAMERA_URL, timeout=20)
+def camera_url_from_args():
+    camera_ip = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CAMERA_IP")
+    if not camera_ip:
+        sys.exit(f"Usage: python {os.path.basename(sys.argv[0])} <camera-ip>"
+                 "   (or set the CAMERA_IP environment variable)")
+    return f"http://{camera_ip}/capture"
+
+
+def capture(camera_url):
+    resp = requests.get(camera_url, timeout=20)
     resp.raise_for_status()
     with open(IMAGE_PATH, "wb") as f:
         f.write(resp.content)
@@ -58,20 +68,26 @@ def describe(jpeg_bytes):
     return json.loads(resp.json()["message"]["content"])
 
 
-def save(obs):
-    timestamp = datetime.now().isoformat(timespec="seconds")
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS observations (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                summary   TEXT,
-                location  TEXT,
-                objects   TEXT,
-                text_seen TEXT,
-                dates     TEXT,
-                activity  TEXT
-            )""")
+def connect():
+    db = sqlite3.connect(DB_PATH)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS observations (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            summary   TEXT,
+            location  TEXT,
+            objects   TEXT,
+            text_seen TEXT,
+            dates     TEXT,
+            activity  TEXT
+        )""")
+    return db
+
+
+def save(obs, taken_at=None):
+    """Store one observation. taken_at is when the photo was captured (defaults to now)."""
+    timestamp = (taken_at or datetime.now()).isoformat(timespec="seconds")
+    with connect() as db:
         cur = db.execute(
             "INSERT INTO observations (timestamp, summary, location, objects, text_seen, dates, activity)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -89,13 +105,7 @@ def save(obs):
 
 
 def main():
-    global CAMERA_URL
-    camera_ip = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CAMERA_IP")
-    if not camera_ip:
-        sys.exit("Usage: python observe.py <camera-ip>   (or set the CAMERA_IP environment variable)")
-    CAMERA_URL = f"http://{camera_ip}/capture"
-
-    jpeg = capture()
+    jpeg = capture(camera_url_from_args())
     print(f"Captured {len(jpeg)} bytes -> {IMAGE_PATH}")
     obs = describe(jpeg)
     row_id, timestamp = save(obs)
