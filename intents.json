@@ -1,0 +1,70 @@
+{
+  "_about": "Example questions for each kind of question Milo can answer instantly. Milo compares a new question's meaning to these (router.py). To teach it a new wording, add an example; to add a new kind, add a key and a handler in ask.py. 'open' means: let the language model answer.",
+  "thing_location": [
+    "where is my pen",
+    "where did I leave my calculator",
+    "where did I put my keys",
+    "have you seen my phone anywhere",
+    "where was my notebook last",
+    "I can't find my screwdriver",
+    "where's my water bottle",
+    "when did you last see my laptop and where",
+    "do you know where my charger is",
+    "last place you saw my headphones",
+    "was there a calculator somewhere",
+    "is there a screwdriver around here anywhere",
+    "where did I put my homework sheet",
+    "have you seen my report card",
+    "where is my textbook",
+    "was there a diploma anywhere"
+  ],
+  "deadlines": [
+    "is anything due soon",
+    "what deadlines do I have",
+    "do I have any homework due",
+    "what's coming up this week",
+    "when is my project due",
+    "did I see any due dates",
+    "any tests or assignments coming up",
+    "what dates did you see",
+    "is there anything I need to hand in"
+  ],
+  "places_visited": [
+    "what rooms was I in tonight",
+    "where have I been today",
+    "which places did I go to",
+    "where was I this afternoon",
+    "what rooms did I spend time in",
+    "list the places you saw me in",
+    "where did I go after dinner"
+  ],
+  "current_activity": [
+    "what am I doing right now",
+    "what do you see right now",
+    "what are you looking at",
+    "what's in front of me",
+    "describe what you see now",
+    "where am I right now"
+  ],
+  "open": [
+    "what was I working on yesterday",
+    "have I been working on electronics",
+    "did you see a laptop",
+    "what was on my desk earlier",
+    "what was I holding",
+    "summarize my day",
+    "what color was my notebook",
+    "how many times did you see the certificate",
+    "did I finish the circuit",
+    "what was I doing around 9 PM",
+    "who was I with",
+    "was the light on in the kitchen",
+    "what did the note on my desk say",
+    "what projects have I started recently",
+    "did anything change on my desk",
+    "what was written on the certificate",
+    "did you see my test paper",
+    "what grade was on the report",
+    "was there anything on the whiteboard about the exam"
+  ]
+}

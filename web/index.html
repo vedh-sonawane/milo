@@ -66,6 +66,10 @@
   .thing .count { color: var(--muted); font-size: 13px; float: right; }
   .thing .where { color: var(--muted); font-size: 13px; margin-top: 2px; }
   .unsure { color: var(--warn); font-size: 12px; }
+  .deadline { display: flex; align-items: baseline; gap: 12px; padding: 6px 0; }
+  .deadline .when { min-width: 92px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .deadline .left { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .deadline.soon .when, .deadline.soon .left { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -81,6 +85,11 @@
 
 <main>
   <div>
+    <section class="card" id="deadlinesCard" style="display:none; margin-bottom:16px">
+      <h2>Coming up</h2>
+      <div id="deadlines"></div>
+    </section>
+
     <section class="card">
       <h2>Ask Milo</h2>
       <form id="ask" class="row">
@@ -116,9 +125,10 @@
     <dl>
       <dt>Last photo checked</dt><dd id="lastCapture">-</dd>
       <dt>Frames checked</dt><dd id="frames">0</dd>
-      <dt>Skipped as blurry</dt><dd id="blurry">0</dd>
-      <dt>Memories saved</dt><dd id="saved">0</dd>
-      <dt>Dropped as repeats</dt><dd id="dropped">0</dd>
+      <dt>Skipped (unusable: covered, dark)</dt><dd id="blurry">0</dd>
+      <dt>Recorded instantly</dt><dd id="queued">0</dd>
+      <dt>Described by the AI</dt><dd id="saved">0</dd>
+      <dt>Too many to describe (kept)</dt><dd id="dropped">0</dd>
     </dl>
   </aside>
 </main>
@@ -157,10 +167,10 @@ async function refreshStatus() {
   btn.disabled = busy; btn.textContent = s.running ? "Pause" : "Start watching";
   btn.className = s.running ? "" : "primary";
   $("lastCapture").textContent = s.last_capture_at ? fmtTime(s.last_capture_at) : "-";
-  for (const k of ["frames", "blurry", "saved", "dropped"]) $(k).textContent = s.counts[k];
+  for (const k of ["frames", "blurry", "queued", "saved", "dropped"]) $(k).textContent = s.counts[k];
   showFrame(s);
   const newId = s.last_memory && s.last_memory.id;
-  if (newId && newId !== lastMemoryId) { lastMemoryId = newId; refreshTimeline(); refreshThings(); }
+  if (newId && newId !== lastMemoryId) { lastMemoryId = newId; refreshTimeline(); refreshThings(); refreshDeadlines(); }
 }
 
 // Smooth live video when the camera allows it (USB webcam); otherwise Milo's latest snapshot (ESP32).
@@ -183,11 +193,25 @@ function memoryHtml(m, withDelete) {
   const meta = [m.location, m.activity, objects && "sees: " + objects].filter(Boolean).map(esc).join(" &middot; ");
   return `<div class="memory">
     <div class="time">${fmtTime(m.timestamp)}</div>
-    <div class="body"><div>${esc(m.summary)}</div>
+    <div class="body"><div>${m.summary ? esc(m.summary) : '<span class="muted">Recorded instantly; Milo is still looking at this scene...</span>'}</div>
       ${meta ? `<div class="meta">${meta}</div>` : ""}
       ${chips ? `<div class="chips">${chips}</div>` : ""}</div>
     ${withDelete ? `<button class="del" title="Delete this memory" data-id="${m.id}">Delete</button>` : ""}
   </div>`;
+}
+
+async function refreshDeadlines() {
+  try {
+    const list = await api("/api/deadlines");
+    $("deadlinesCard").style.display = list.length ? "" : "none";
+    $("deadlines").innerHTML = list.map((d, i) => {  // the soonest one is highlighted
+      const due = new Date(d.due + "T00:00:00");
+      const left = d.days_left === 0 ? "today" : d.days_left === 1 ? "tomorrow" : `in ${d.days_left} days`;
+      return `<div class="deadline${i === 0 ? " soon" : ""}">
+        <span class="when">${due.toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"})}</span>
+        <span>${esc(d.title)}</span><span class="left">${left}</span></div>`;
+    }).join("");
+  } catch { /* keep whatever was shown */ }
 }
 
 async function refreshThings() {
@@ -239,17 +263,35 @@ $("ask").addEventListener("submit", async e => {
   const ans = $("answer"), src = $("sources");
   ans.className = "muted"; ans.textContent = "Thinking..."; src.innerHTML = "";
   try {
-    const r = await api("/api/ask", {method: "POST", headers: {"Content-Type": "application/json"},
-                                     body: JSON.stringify({question: q, hours: Number($("hours").value)})});
-    ans.className = ""; ans.textContent = r.answer;
-    if (r.sources.length)
-      src.innerHTML = `<div class="sources"><div class="muted">Based on</div>${r.sources.map(m => memoryHtml(m, false)).join("")}</div>`;
+    // Streamed: words appear as Milo writes them (one JSON object per line), then the final answer + sources.
+    const resp = await fetch("/api/ask/stream", {method: "POST", headers: {"Content-Type": "application/json"},
+                                                 body: JSON.stringify({question: q, hours: Number($("hours").value)})});
+    if (!resp.ok) throw new Error((await resp.text()) || resp.statusText);
+    const reader = resp.body.getReader(), decoder = new TextDecoder();
+    let buffered = "", started = false;
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, {stream: true});
+      const lines = buffered.split("\n");
+      buffered = lines.pop();
+      for (const line of lines.filter(Boolean)) {
+        const ev = JSON.parse(line);
+        if (!started) { ans.className = ""; ans.textContent = ""; started = true; }
+        if (ev.text) ans.textContent += ev.text;
+        if (ev.done) {
+          ans.textContent = ev.answer;
+          if (ev.sources.length)
+            src.innerHTML = `<div class="sources"><div class="muted">Based on</div>${ev.sources.map(m => memoryHtml(m, false)).join("")}</div>`;
+        }
+      }
+    }
   } catch (err) { ans.className = "muted"; ans.textContent = "Milo could not answer: " + err.message; }
 });
 
-refreshStatus(); refreshTimeline(); refreshThings();
+refreshStatus(); refreshTimeline(); refreshThings(); refreshDeadlines();
 setInterval(refreshStatus, 2000);
-setInterval(() => { refreshTimeline(); refreshThings(); }, 30000);
+setInterval(() => { refreshTimeline(); refreshThings(); refreshDeadlines(); }, 30000);
 </script>
 </body>
 </html>

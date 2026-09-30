@@ -46,14 +46,17 @@ class Camera:
         self.cap = open_camera(index)
         if not self.cap.isOpened():
             raise SystemExit(f"Could not open camera {index}. Run with --list to see cameras.")
-        # Ask for the webcam's own MJPEG format first: it allows higher resolution at full frame rate.
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # Above 640x480 USB 2 needs the webcam's own MJPEG compression to keep the frame rate. At 640x480
+        # uncompressed YUYV fits, is faster (measured 28 vs 25 fps on the Pi) and has no in-camera JPEG loss.
         for w, h in RESOLUTIONS:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*("MJPG" if w * h > 640 * 480 else "YUYV")))
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
             if int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) == w:
                 break
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always hand out the newest frame, not a queued one
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        # No CAP_PROP_BUFFERSIZE=1: on Linux it halves the frame rate. The reader thread below keeps the
+        # buffer drained anyway, so frames handed out are always the newest.
         self.frame = None
         self.frame_id = 0
         self.fps = 0.0

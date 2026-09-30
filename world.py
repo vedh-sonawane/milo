@@ -19,7 +19,7 @@ import threading
 
 import requests
 
-from observe import OLLAMA_URL, connect as connect_memories
+from observe import GPU, OLLAMA_URL, connect as connect_memories
 
 EMBED_URL = OLLAMA_URL.replace("/api/chat", "/api/embed")
 EMBED_MODEL = "nomic-embed-text"
@@ -71,7 +71,9 @@ def normalize(name):
 
 def embed(texts):
     """nomic-embed-text wants a task prefix on each text: "clustering: ", "search_query: " or "search_document: "."""
-    resp = requests.post(EMBED_URL, json={"model": EMBED_MODEL, "input": texts}, timeout=60)
+    with GPU:
+        # keep_alive: stay loaded; reloading it cost ~4 s on every question after 5 idle minutes
+        resp = requests.post(EMBED_URL, json={"model": EMBED_MODEL, "input": texts, "keep_alive": "24h"}, timeout=60)
     resp.raise_for_status()
     return resp.json()["embeddings"]
 
@@ -159,7 +161,7 @@ def catch_up():
         row = db.execute("SELECT value FROM world_meta WHERE key = 'last_observation_id'").fetchone()
         last_id = int(row[0]) if row else 0
         rows = db.execute("SELECT id, timestamp, location, objects, summary, text_seen, dates, activity"
-                          " FROM observations WHERE id > ? ORDER BY id", (last_id,)).fetchall()
+                          " FROM observations WHERE id > ? AND described = 1 ORDER BY id", (last_id,)).fetchall()
         for obs_id, timestamp, location, objects, summary, text_seen, dates, activity in rows:
             objects = json.loads(objects or "[]")
             document = memory_text(summary, location, activity, objects,

@@ -792,3 +792,102 @@ Give me the first concrete milestone that we can start implementing immediately 
 Do not give me code yet unless it is genuinely necessary to explain the architecture.
 
 Think like a senior robotics engineer + AI systems architect helping me turn a very ambitious idea into a real, buildable system.
+
+---
+
+# ROADMAP (AGREED 2026-09-28)
+
+This is the working plan. Each step ends with something that works and has been tested.
+
+## END GOAL
+
+A shoulder-worn companion that sees what I see, remembers it, understands it (things, places, projects, deadlines, and how they change), answers by voice within a couple of seconds, notices what matters and otherwise stays quiet, keeps working away from home, and does a few genuinely useful physical things. Everything runs locally on hardware I already own.
+
+## RULES FOR EVERY STEP
+
+* No hardcoding behaviour. Prefer things Milo learns from its own memories and from my feedback over fixed word lists, regex rules, or magic numbers. Measured calibration values are acceptable only if they are documented and re-tunable.
+* Image quality stays at maximum (640x480, JPEG quality 100). Speed has to come from somewhere else.
+* Everything must be fast: answers within about 5 seconds, a smooth live view, and quick recovery after power or Wi-Fi loss.
+* Local only. No cloud services. Store memories, not footage.
+* Never commit or push for me; I do that myself.
+* Every feature, physical ones included, must actually help me. Each step states the helpful outcome up front ("I stop forgetting my calculator on test days") and is tested against that outcome, not just "it runs". Anything that doesn't measurably help gets changed or removed.
+
+## DONE
+
+1. Photo to memory: camera, local vision model (qwen2.5vl:7b), SQLite.
+2. Watching on its own: fast capture, frames grouped into scenes, blur and duplicate skipping, background describing. Built for walking, not holding still.
+3. Asking plus a web app: answers with sources, memory timeline, pause, delete, live view.
+4. World model v1: things, sightings, "last seen where", and how sure each match is.
+5. Wearable camera: Raspberry Pi 5 with a USB webcam (Ubisoft Wii camera) on a power bank. Starts automatically, streams about 30 fps over Wi-Fi, recovers by itself after reboots. Wi-Fi power saving is off.
+6. Speed pass: lookups answer instantly, other questions in about 2.5 to 4.5 seconds. One AI job runs at a time, and questions go first.
+
+## NEXT
+
+7. Remove the hardcoding (laptop only)
+   * DONE: question types learned from example questions instead of regex rules (router.py, intents.json). Helpful outcome: my own wordings get instant answers. Measured on 30 unseen questions: 26 right, 0 wrong instant answers (old rules: 18 right, 3 wrong).
+   * Places learned by grouping memories that look alike; I can name a place once in the UI.
+     Finding (2026-09-28): the memories' text alone cannot separate places (memories a minute apart
+     scored 0.875 similar, memories hours apart 0.826, with heavy overlap), so this needs a visual
+     fingerprint of each photo (an image-embedding model; the photo itself is still not stored).
+     Needs the camera (Pi or laptop webcam) to test.
+   * What is worth tracking decided by the model, not a word list.
+   * Match thresholds that retune themselves when I correct a merge.
+   * DONE: the watcher's thresholds (unusable frame, new scene, real stay vs glance) are learned from what
+     the camera sees (learn.py: the data decides how many groups there are; a split is only used when the
+     groups are clearly separate, otherwise nothing is filtered). Finding: one global blur cutoff can't work
+     because sharpness depends on the scene, so ordinary blur is handled by keeping each scene's sharpest
+     frame and only clearly unusable frames (covered lens, darkness) are skipped.
+
+8. Memory levels (laptop only)
+   * Episodes: stretches of activity ("9:00 to 9:40 PM, electronics at the desk").
+     Finding (2026-09-28): on the current memories (mostly camera testing) no approach gave useful
+     episodes; the big reasoning model (gpt-oss:20b) did best but evicts the fast models. Needs 1-2 hours
+     of real wearing data first; then build it to run only while Milo is idle.
+   * Projects: recurring episodes with the same things become a project with a history.
+   * Nightly consolidation: old raw memories are summarised into episodes and project notes, so memory stays small and fast over months.
+   * This covers short-term, recent, long-term, episodic and semantic memory.
+
+9. Milo notices things (laptop only)
+   * DONE: real deadlines ("Science project due Sat Oct 3, in 5 days") in a Coming up panel and in answers. Dates are read by the model, checked against the written text, and computed with calendar math (no date rules). tests/deadline_eval.py 10/10; answers 33/33.
+   * Changes ("calculator moved"), unfinished projects, and things that are usually around but now missing.
+   * Importance learned from my reactions: it starts cautious, and every dismissal or "useful" teaches it what is worth saying. No fixed scoring rules.
+   * Shown quietly in a "Milo noticed" panel. Nothing interrupts me.
+
+10. Voice (laptop microphone and speaker first)
+    * Local speech-to-text and text-to-speech: "Milo, where is my calculator?" answered out loud.
+    * Later: a microphone and speaker on the Pi, salvaged from old laptops.
+
+11. Away from home (Pi)
+    * Without home Wi-Fi, the Pi keeps only sharp, distinct scenes in a size-capped buffer on its SD card (oldest dropped first).
+    * Back home it uploads them, the PC turns them into memories, and the Pi deletes its copies.
+
+12. Privacy and consent (Pi plus kit parts)
+    * An LED that is on whenever the camera is recording, and a physical pause button.
+    * Blur other people's faces before anything is stored, retention limits, one-tap delete.
+
+13. Physical actions (each one checked against weeks of real memories before it is built)
+    On the shoulder (must stay light):
+    * Silent shoulder tap (small DC motor or SG90): different patterns for "deadline soon", "you're leaving something behind", "camera blocked". Gets my attention without speaking.
+    * Privacy shutter (SG90): a flap physically covers the lens on pause, in bathrooms, or when someone asks. Other people can see it is covered.
+    * "Look at that" camera aim (SG90 pan): turns toward what I'm looking at or pointing at, or toward something half-seen at the edge of the frame. Enables "Milo, read that" and gives better memories.
+    At home (on a dock, where heavier motors are fine):
+    * Watch-station dock (28BYJ-48 turntable): when I take Milo off, it slowly scans the desk or room to keep the world model current, and charges there.
+    * Glance display (LCD1602 or 8x8 LED matrix): silently shows the one thing that matters most right now ("Science proj: FRI").
+    * Grab-and-go door tray (SG90 latch or 12V gearmotor): pops open with a light when there is something I need to take today.
+    Suggested order: tap and shutter first, then camera aim, then the dock and display, then the door tray.
+
+## WORKING ORDER (FROM 2026-09-28, HARDWARE AVAILABLE AGAIN)
+
+1. Quick hardware wins: Pi desktop turned off (faster start), check camera, Wi-Fi fix and auto-start after a power cycle.
+2. A real wearing session (1-2 hours of a normal evening, a couple of notes with dates). The most important step: everything after it is tuned on real data instead of camera tests.
+3. Things that need that real data: episodes, projects, learned places (visual fingerprints), faster photo descriptions (only if text reading stays as good).
+4. Milo learns from me: corrections on the page (removes the last hardcoded lists and numbers), and the "Milo noticed" panel that learns from what I dismiss.
+5. Voice on the laptop's microphone and speaker.
+6. Away from home: the Pi buffers scenes without home Wi-Fi and uploads them later.
+7. Privacy: recording LED and pause button on the Pi (kit parts).
+8. Physical actions: shoulder tap, lens shutter, camera aim, then the home dock and door tray.
+
+Done (2026-09-29): instant record. Every kept scene is stored at once with its text (Windows OCR, ~20 ms), so nothing waits for the vision model; the full description fills in later. From the first wearing session: descriptions of real scenes take 25-40 s each, so this was needed.
+
+Ongoing: speed (a smaller vision model only if it reads text equally well), tests, reliable restarts, and backups of memory.db.
+Done along the way: answers stream (first words ~3 s); older related memories are included so they are answered, not made up; answer accuracy measured at 27/27 (tests/answer_eval.py).

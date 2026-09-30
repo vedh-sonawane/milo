@@ -14,19 +14,23 @@ Run: python watch.py <camera-ip>   (or set CAMERA_IP). Stop with Ctrl+C.
 
 import io
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from dataclasses import dataclass
 from datetime import datetime
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
+import ask
+import deadlines
+import learn
 import world
-from observe import ASKING, camera_url_from_args, capture, describe, save
+from observe import ASKING, Interrupted, camera_url_from_args, capture, complete, describe, read_text, record
 
 CAPTURE_INTERVAL = 1.0   # seconds between captures (a USB webcam capture takes ~0.2 s)
-MIN_SHARPNESS = 400      # measured on the USB webcam: sharp 670-850, blurred ~220, dark or covered ~10
-MIN_CHANGE = 20          # measured: brightness flicker ~8, small wobble ~16, new scene ~55
-SCENE_SETTLE = 4.0       # a scene that stays this long is queued without waiting for it to end
+# What counts as blurry, as a new scene, and as a real stay (vs a glance) is learned from what the camera
+# actually sees (learn.Split): no hand-set thresholds. Until a learner has seen two clear groups it
+# decides nothing, so nothing is skipped while it learns.
 MAX_QUIET = 600          # remember an unchanged scene again after this long, to record time spent there
 RECENT_SECONDS = 120     # a scene matching one queued this recently is a look-back, not a new scene
 QUEUE_LIMIT = 30         # scenes waiting for the model; beyond this the most redundant is dropped
@@ -38,6 +42,7 @@ class Frame:
     taken_at: datetime
     sharpness: float
     thumb: Image.Image
+    row_id: int = 0  # its memory, recorded instantly before the vision model describes it
 
 
 @dataclass
@@ -75,7 +80,12 @@ class Watcher:
         self._queue = []              # Frames waiting for the model, oldest first
         self._recent = []             # (thumb, monotonic time) of recently queued scenes
         self._scene = None
+        self._prev_thumb = None
+        self.blur = learn.Split("sharpness", "above_lowest")      # unusable frames (covered, dark, smeared) are the lowest group
+        self.motion = learn.Split("change", "below_highest")         # a new view is the highest group of frame-to-frame change
+        self.stay = learn.Split("scene_seconds", "above_lowest")   # quick glances are the lowest group of scene lengths
         self._cond = threading.Condition()
+        self._recorder = ThreadPoolExecutor(max_workers=1)  # instant records, in order, off the capture thread
         self._stop = threading.Event()
         self._capture_thread = None
         self._describe_thread = None
@@ -123,6 +133,8 @@ class Watcher:
             "pending": self.pending(),
             "last_memory": self.last_memory,
             "counts": dict(self.counts),
+            "learned": {"blurry_below": self.blur.describe(), "new_scene_above": self.motion.describe(),
+                        "stay_after_seconds": self.stay.describe()},
         }
 
     # ---- capture side ----
@@ -153,15 +165,22 @@ class Watcher:
         self.counts["frames"] += 1
         img = Image.open(io.BytesIO(jpeg))
         frame = Frame(jpeg, datetime.now(), sharpness(img), thumbnail(img))
-        if frame.sharpness < MIN_SHARPNESS:
+        self.blur.add(frame.sharpness)
+        if self._prev_thumb is not None:
+            self.motion.add(change(frame.thumb, self._prev_thumb))
+        self._prev_thumb = frame.thumb
+
+        blurry_below = self.blur.cutoff()
+        if blurry_below is not None and frame.sharpness < blurry_below:
             self.counts["blurry"] += 1
             return
 
-        scene = self._scene
-        if scene and change(frame.thumb, scene.anchor) < MIN_CHANGE:
+        scene, new_scene_above = self._scene, self.motion.cutoff()
+        if scene and new_scene_above is not None and change(frame.thumb, scene.anchor) < new_scene_above:
             if frame.sharpness > scene.best.sharpness:
                 scene.best = frame
-            if not scene.queued_at and now - scene.started >= SCENE_SETTLE:
+            stay_after = self.stay.cutoff()
+            if not scene.queued_at and stay_after is not None and now - scene.started >= stay_after:
                 self._enqueue(scene.best, "new scene", check_recent=True)
                 scene.queued_at, scene.best = now, frame
             elif scene.queued_at and now - scene.queued_at >= MAX_QUIET:
@@ -169,18 +188,39 @@ class Watcher:
                 scene.queued_at, scene.best = now, frame
             return
 
-        # The view changed. A scene that ended before settling (a glance while walking) still counts.
-        if scene and not scene.queued_at:
-            self._enqueue(scene.best, "passing view", check_recent=True)
+        # The view changed (or scenes aren't learned yet: then every frame is its own scene and the
+        # queue's redundancy check thins them out). A scene that ended before it counted as a stay
+        # (a glance while walking) still counts.
+        if scene:
+            if new_scene_above is not None:
+                self.stay.add(now - scene.started)
+            if not scene.queued_at:
+                self._enqueue(scene.best, "passing view", check_recent=True)
         self._scene = Scene(anchor=frame.thumb, best=frame, started=now)
 
     def _enqueue(self, frame, reason, check_recent=False):
         now = time.monotonic()
         with self._cond:
             self._recent = [(t, at) for t, at in self._recent if now - at < RECENT_SECONDS]
-            if check_recent and any(change(frame.thumb, t) < MIN_CHANGE for t, _ in self._recent):
+            same_view = self.motion.cutoff()
+            if check_recent and same_view is not None and any(change(frame.thumb, t) < same_view for t, _ in self._recent):
                 return  # looked away and back; already have this view
             self._recent.append((frame.thumb, now))
+        self._recorder.submit(self._record, frame)
+
+    def _record(self, frame):
+        """Instant record: read the scene's text on the CPU (~0.2 s) and store the memory right away, then
+        hand the photo to the vision model. If the model never gets to it, the time and text are still kept."""
+        try:
+            text = read_text(frame.jpeg)
+        except Exception as e:
+            text = []
+            self.log(f"Text reading failed: {e.__class__.__name__}: {e}")
+        frame.row_id, timestamp = record(frame.taken_at, text)
+        self.last_memory = {"id": frame.row_id, "timestamp": timestamp, "summary": ""}
+        self.log(f"#{frame.row_id} recorded (taken {frame.taken_at:%H:%M:%S})"
+                 + (f" | text: {', '.join(text)}" if text else ""))
+        with self._cond:
             self._queue.append(frame)
             self.counts["queued"] += 1
             if len(self._queue) > QUEUE_LIMIT:
@@ -188,7 +228,8 @@ class Watcher:
             self._cond.notify()
 
     def _drop_most_redundant(self):
-        """Drop the queued frame most similar to another queued frame (ties: the blurrier one)."""
+        """Stop waiting to describe the queued frame most similar to another queued one (ties: the blurrier).
+        Its memory stays, with its time and text; it just won't get a full description."""
         def redundancy(i):
             others = (change(self._queue[i].thumb, f.thumb) for j, f in enumerate(self._queue) if j != i)
             return (min(others), self._queue[i].sharpness)
@@ -208,16 +249,23 @@ class Watcher:
             try:
                 while ASKING.is_set():  # a question is being answered: let it use the model first
                     time.sleep(0.2)
-                obs = describe(frame.jpeg)
-                row_id, timestamp = save(obs, frame.taken_at)
+                try:
+                    obs = describe(frame.jpeg, interruptible=True)
+                except Interrupted:  # a question came in mid-description: redo this photo afterwards
+                    with self._cond:
+                        self._queue.insert(0, frame)
+                    continue
+                complete(frame.row_id, obs)
                 self.counts["saved"] += 1
-                self.last_memory = {"id": row_id, "timestamp": timestamp, "summary": obs.get("summary", "")}
-                text = ", ".join(map(str, obs.get("text_seen", []))) or "-"
-                self.log(f"#{row_id} (taken {frame.taken_at:%H:%M:%S}, {self.pending() - 1} waiting): "
-                         f"{obs.get('summary', '')} | text: {text}")
+                self.last_memory = {"id": frame.row_id, "timestamp": frame.taken_at.isoformat(timespec="seconds"),
+                                    "summary": obs.get("summary", "")}
+                self.log(f"#{frame.row_id} described ({self.pending() - 1} waiting): {obs.get('summary', '')}")
                 world.catch_up()  # add this memory's objects to the world model
-            except Exception as e:  # bad model output or Ollama down: skip this frame, keep going
-                self.log(f"Describe failed: {e.__class__.__name__}: {e}")
+                ask.warm_soon()   # pre-read it so questions stay fast
+                if obs.get("dates"):
+                    deadlines.safe_catch_up(self.log)  # read its dates into real deadlines
+            except Exception as e:  # bad model output or Ollama down: the memory keeps its time and text
+                self.log(f"#{frame.row_id} not described (kept its time and text): {e.__class__.__name__}: {e}")
             finally:
                 with self._cond:
                     self._describing = False

@@ -15,7 +15,8 @@ It is not a smart-home gadget, a chatbot in a box, or an object detector. It is 
 quiet, persistent, local intelligence that mostly stays silent and only speaks up when something
 is actually worth saying.
 
-The full vision, constraints, and hardware inventory are in [Full_Project.MD](Full_Project.MD).
+The full vision, constraints, hardware inventory, and the step-by-step roadmap (section "ROADMAP") are in
+[Full_Project.MD](Full_Project.MD).
 
 ## Status
 
@@ -53,7 +54,7 @@ Camera (webcam or ESP32)                        Windows PC
 Milo is worn while you walk around, so it can't wait 20 seconds for a steady shot. The slow part is
 the vision model (about 15 seconds per photo on the GPU), so capturing and describing run separately:
 
-1. **Capture, every second.** Each frame gets a sharpness score. Blurry or dark frames are skipped.
+1. **Capture, every second.** Each frame gets a sharpness score; clearly unusable frames (covered lens, dark) are skipped, using thresholds learned from what the camera sees.
 2. **Scenes.** Frames that look alike are grouped into a scene, and only the sharpest one is kept,
    so a clear frame wins over a blurry step. A scene is queued once it has been steady for 4 seconds,
    or when the view changes (a glance while walking still counts). Glancing back at a view queued in
@@ -61,16 +62,37 @@ the vision model (about 15 seconds per photo on the GPU), so capturing and descr
    10 minutes so Milo knows how long you were there.
 3. **Queue.** Scenes wait for the model. If you move faster than it can keep up, the queue holds 30
    and drops the most redundant scene first, so a walk still ends up as a spread of distinct memories.
-4. **Describe, in the background.** The local vision model (Ollama, nothing leaves the PC) returns
+4. **Instant record.** The moment a scene is kept, it is saved as a memory with its time and any text in
+   it, read by Windows' built-in OCR on the processor (about 20 ms, no waiting for the AI). Walking past a
+   poster, its text is stored within a fraction of a second, and shows in the terminal and the page. If
+   the AI never gets to a scene (too much going on), the memory still keeps its time and text.
+5. **Describe, in the background.** The local vision model (Ollama, nothing leaves the PC) returns
    JSON: summary, location, objects, exact text seen, dates, activity. It is told not to guess blurry
    text or invent objects. Each memory is stored with the time the photo was **taken**.
-5. **World model.** Every object in a new memory becomes a *sighting* of a *thing*. Names that mean the
+6. **World model.** Every object in a new memory becomes a *sighting* of a *thing*. Names that mean the
    same (checked with the small local `nomic-embed-text` model) are the same thing: "black calculator"
    and "calculator" merge, "pen holder" and "pen" do not. Each sighting keeps when, where, and how sure
    the match was. People and body parts are never tracked as things.
-6. **Ask.** Questions are answered only from stored memories and things, with the memories used as sources.
-   Only the memories and things most related to the question (plus the latest few) are sent to the
-   model, so answers stay fast however many memories pile up.
+7. **Ask, in a few seconds.** Lookups are answered instantly from the world model with no AI at all:
+   "where is my X", "is anything due", "what rooms was I in", "what am I doing now". Which kind of
+   question it is gets decided by *meaning*: the question is compared to example questions in
+   `intents.json`, the closest examples vote, and a kind only wins with a majority (otherwise the AI
+   answers). On 30 unseen wordings: 26 routed right and 0 wrong instant answers, vs 18 and 3 for the old
+   word rules. To teach a new wording, add an example; no code change. Answers are **streamed**: the first
+   words appear after about 3 seconds and the rest fills in. Related memories too old for the pre-read log
+   are added to the question, so older things are answered instead of made up. Measured with
+   `tests/answer_eval.py`: 33/33 correct for `llama3.2:3b` (qwen2.5:3b scored 63%, so it was not used).
+8. **Deadlines.** Every date Milo reads becomes a real calendar date, shown in a **Coming up** panel
+   ("Sat Oct 3: science project due, in 5 days"). No date rules are written in code: the vision model
+   reports only what is literally written (month, day, weekday, "tomorrow"), each part is checked against
+   the written text, and plain calendar arithmetic does the rest (a date without a year is the occurrence
+   closest to when the photo was taken; without a day it is incomplete and never shown). Duplicate
+   sightings are merged when the model says they are the same note (a focused yes/no check for partial
+   dates; two different complete dates are never merged). `tests/deadline_eval.py`: 10/10. Everything else goes
+   to a small text model (`llama3.2:3b`) whose memory log is **pre-read in the background** after each new
+   memory, so only the question itself is new when you ask. Measured: lookups 0.0 s, other questions
+   about 2.5-4.5 s. Only one AI job runs at a time on the GPU; a question interrupts a photo description,
+   which is redone right after.
    If Milo never saw something, it says so instead of guessing. "Where is X" uses the latest sighting.
 
 Example stored memory:
@@ -117,6 +139,16 @@ server.py              Web app server: runs the watcher and serves the page and 
 watch.py               Watcher: fast capture, scenes, queue, background describing
 ask.py                 Answers questions from the relevant memories and things
 world.py               World model: things, sightings, matching, search
+learn.py               Learns thresholds from the data itself (no hand-set numbers)
+router.py              Decides what kind of question was asked, by meaning, from examples
+deadlines.py           Dates Milo read, as real calendar dates: merged, sorted, days left
+episodes.py            Draft: memories grouped into episodes (not used yet, needs real wearing data)
+intents.json           Example questions per kind (add examples to teach new wordings)
+tests/routing_eval.py  Scores the router on questions it has never seen
+tests/answer_eval.py   Scores answering models on questions with known answers (compare models)
+tests/deadline_eval.py Checks dates are read into the right calendar dates
+tests/watch_learning_eval.py  Checks the watcher's learned thresholds on simulated frames
+tests/instant_record_eval.py  Checks scenes are recorded instantly with their text, then described
 observe.py             One snapshot -> vision model -> memory; shared helpers
 Full_Project.MD        Full vision, constraints, hardware inventory
 AGENTS.md              Instructions for AI coding assistants working in this repo
@@ -126,8 +158,10 @@ Runtime files that stay on the PC and are gitignored: `memory.db`, `last_capture
 
 ## Hardware
 
-- **Camera (recommended):** any USB webcam. Tested with the Ubisoft Wii camera (640x480, 30 fps).
-  It plugs into this PC for now and into the Raspberry Pi later, when Milo is worn.
+- **Camera (recommended):** a USB webcam on the **Raspberry Pi 5**, powered by a USB-C power bank, so
+  Milo is wireless and wearable. Tested with the Ubisoft Wii camera (640x480) and a 5V/2A power bank:
+  about 25-30 fps over Wi-Fi, no low-voltage warnings, Pi about 50 C and mostly idle.
+- The same webcam also works plugged straight into the PC (for testing).
 - **Camera (fallback):** Freenove ESP32-WROVER CAM (GC0308 sensor, 640x480, no hardware JPEG, so only
   a few frames per second). Wireless on its own, but not smooth.
 - A Windows PC running [Ollama](https://ollama.com) with the `qwen2.5vl:7b` model
@@ -135,11 +169,40 @@ Runtime files that stay on the PC and are gitignored: `memory.db`, `last_capture
 ## Setup
 
 ```powershell
-pip install requests pillow fastapi uvicorn opencv-python
+pip install requests pillow fastapi uvicorn opencv-python numpy winocr rapidocr-onnxruntime
 ollama pull qwen2.5vl:7b
+ollama pull llama3.2:3b
+ollama pull nomic-embed-text
 ```
 
-### USB webcam
+### Raspberry Pi 5 camera (wearable)
+
+One-time setup (already done for `milo`):
+
+1. Raspberry Pi Imager: Raspberry Pi OS Lite (64-bit), hostname `milo`, user `milo`, your Wi-Fi,
+   SSH with **public-key only** (key: `~/.ssh/milo_pi.pub` on the PC). Raspberry Pi Connect off.
+2. Without admin rights: OpenCV goes into a private environment and cron starts the camera at boot.
+
+   ```bash
+   python3 -m venv ~/milo-env && ~/milo-env/bin/pip install opencv-python-headless
+   # copy camera_server.py to ~/ and create ~/start_camera.sh (a loop that runs it and restarts it)
+   (crontab -l; echo "@reboot sleep 10 && $HOME/start_camera.sh") | crontab -
+   ```
+
+After that it is plug and play: plug the webcam and power bank into the Pi, wait about a minute, and
+the camera is at `http://milo.local:8081/`. Milo's camera address is `milo.local:8081`.
+
+Update the camera code on the Pi after changing `camera_server.py`:
+
+```powershell
+scp -i $env:USERPROFILE\.ssh\milo_pi camera_server.py milo@milo.local:~/
+ssh -i $env:USERPROFILE\.ssh\milo_pi milo@milo.local "pkill -f [c]amera_server.py"   # restarts itself
+```
+
+Check power and temperature: `ssh -i $env:USERPROFILE\.ssh\milo_pi milo@milo.local "vcgencmd get_throttled; vcgencmd measure_temp"`
+(`throttled=0x0` means no low-voltage problems).
+
+### USB webcam on the PC (testing)
 
 ```powershell
 python camera_server.py --list         # find the webcam's number
@@ -167,7 +230,7 @@ Milo's camera address is then `localhost:8081`.
 ### Tell Milo which camera to use
 
 ```powershell
-setx CAMERA_IP localhost:8081     # webcam; or the ESP32's address
+setx CAMERA_IP milo.local:8081    # Pi; localhost:8081 for a webcam on the PC; or the ESP32's address
 ```
 
 Open a new terminal afterwards so `CAMERA_IP` is picked up. (You can also pass the address as the first
@@ -284,16 +347,25 @@ For Python changes, at minimum run `python -m py_compile observe.py watch.py ask
   blurry.
 - **The model is the bottleneck.** About 4 memories per minute at most. On a busy walk the queue fills
   and the most redundant scenes are dropped; the timeline catches up once you slow down.
-- **Answers take about 20-25 seconds** on this PC (Intel Arc integrated graphics reads about 80 tokens
-  per second). Describing new photos pauses while a question is answered, so questions go first.
+- **This PC has Intel Arc integrated graphics**, which reads new text at only ~100-150 tokens/s and
+  cannot run two models at once reliably (the vision model crashed). Hence: one AI job at a time,
+  questions first, a small pre-read answering model, and instant lookups. Big open-ended questions
+  ("what was I doing around 9") can still take ~8 s.
+- **Use `127.0.0.1`, not `localhost`, for Ollama on Windows.** `localhost` tries IPv6 first and cost
+  about 2 s on every request (embeddings went from 2.1 s to 0.06 s after the fix).
 - **Matching names is by meaning, with measured thresholds** (top of `world.py`). Same things scored
   0.885-0.98 and different things up to 0.873, so the grey zone 0.88-0.92 also requires the last word
   to match. Rare wrong merges or splits are possible; `world.rebuild()` re-runs everything after tuning.
-- **Tuning values are first guesses** (top of `watch.py`), measured on a few photos. Tune them after
-  real wearing.
+- **The watcher learns its thresholds from what the camera sees** (`learn.py`). Until it has seen enough
+  to be sure (a fresh start), it filters nothing, so the first minutes queue more scenes than later on.
+  What it learned so far is shown in `/api/status` under `learned`.
+- **Power bank life is about 3 hours** with the 5000 mAh (2750 mAh at 5V) bank.
 - **Home Wi-Fi only.** Away from home the camera has no network. Buffering on the Raspberry Pi and
   syncing later is a future layer.
-- **The camera IP can change** if the router hands out a new address. Check the serial monitor.
+- **Finding the camera.** Windows looks up `milo.local` unreliably (it can fail with the Pi online), so
+  Milo tries the name, then the last address that worked (saved in `memory.db`), then searches the local
+  network for a camera (about 2 s, backing off while none is found). For your own commands (ssh), use the
+  Pi's address, e.g. `192.168.2.23`, if `milo.local` fails.
 
 ## Privacy
 

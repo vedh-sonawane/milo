@@ -5,6 +5,7 @@ Run: python server.py [camera-ip]   (or set CAMERA_IP), then open http://localho
 """
 
 import argparse
+import json
 import os
 import sys
 import threading
@@ -18,8 +19,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 import ask
+import deadlines
 import world
-from observe import connect
+from observe import by_ip, connect
 from watch import Watcher
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -34,9 +36,9 @@ def live_supported():
     global _live_supported
     if _live_supported is None:
         try:
-            resp = requests.get(watcher.camera_url, timeout=5)
+            resp = requests.get(by_ip(watcher.camera_url), timeout=5)
             _live_supported = resp.headers.get("X-Camera-Viewers") == "many"
-        except requests.RequestException:
+        except (requests.RequestException, OSError):  # OSError: the camera's name can't be looked up
             return False  # camera offline; ask again next time
     return _live_supported
 
@@ -64,13 +66,15 @@ def live_stream():
         raise HTTPException(404, "This camera can't stream while Milo is watching")
     stream_url = watcher.camera_url.rsplit("/capture", 1)[0] + "/"
     try:
-        upstream = requests.get(stream_url, stream=True, timeout=(5, 10))
-    except requests.RequestException as e:
+        upstream = requests.get(by_ip(stream_url), stream=True, timeout=(5, 10))
+    except (requests.RequestException, OSError) as e:
         raise HTTPException(502, f"Camera stream unavailable: {e}")
 
     def relay():
         try:
             yield from upstream.iter_content(16384)
+        except requests.RequestException:
+            pass  # Wi-Fi dropout on the way from the camera: end this stream quietly; the page reconnects
         finally:
             upstream.close()
 
@@ -112,6 +116,11 @@ def delete_memory(memory_id: int):
     return {"deleted": memory_id}
 
 
+@app.get("/api/deadlines")
+def upcoming_deadlines():
+    return deadlines.upcoming()
+
+
 @app.get("/api/things")
 def things(hours: float = 24):
     since = (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")
@@ -123,6 +132,22 @@ def ask_milo(q: Question):
     if not q.question.strip():
         raise HTTPException(400, "Empty question")
     return ask.answer(q.question.strip(), q.hours)
+
+
+@app.post("/api/ask/stream")
+def ask_milo_stream(q: Question):
+    """The answer as it's written: one JSON object per line ({"text": ...} pieces, then {"done": ...})."""
+    if not q.question.strip():
+        raise HTTPException(400, "Empty question")
+
+    def lines():
+        try:
+            for event in ask.answer_stream(q.question.strip(), q.hours):
+                yield json.dumps(event) + "\n"
+        except Exception as e:  # surface the problem in the page instead of a silently cut-off answer
+            yield json.dumps({"done": True, "answer": f"Milo could not answer: {e}", "sources": []}) + "\n"
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 def main():
@@ -140,8 +165,9 @@ def main():
     watcher = Watcher(f"http://{args.camera_ip}/capture")
     if not args.paused:
         watcher.start()
-    # Bring the world model up to date with any memories saved while it wasn't running.
-    threading.Thread(target=world.catch_up, daemon=True).start()
+    # Bring the world model up to date with memories saved while it wasn't running, then pre-read the
+    # memory log so the first question is fast too.
+    threading.Thread(target=lambda: (world.catch_up(), deadlines.safe_catch_up(), ask.warm_soon()), daemon=True).start()
 
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     if args.lan:
